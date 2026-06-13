@@ -33,6 +33,9 @@
 #include <sys/time.h>
 #include "nvs_flash.h"
 
+#include "driver/mcpwm_cap.h"
+#include "esp_private/esp_clk.h"
+
 static const char *TAG = "water catchment";
 
 
@@ -86,7 +89,7 @@ static const char *TAG = "water catchment";
 #define DEFAULT_RSSI_5G_ADJUSTMENT 0
 #endif /*CONFIG_EXAMPLE_FAST_SCAN_THRESHOLD*/
 
-#define MOTORAC1 12
+#define MOTORAC1 14
 #define MOTORAC2 27
 #define MOTORDC 25
 #define TANK1 21
@@ -94,6 +97,12 @@ static const char *TAG = "water catchment";
 #define TANK3 33
 #define BUZZER 16
 #define LED 2
+
+#define HC_SR04_TRIG_GPIO  12
+#define HC_SR04_ECHO_GPIO  27
+
+#define HC_SR04_TRIG_GPIO_1 26
+#define HC_SR04_ECHO_GPIO_1  25
 
 EventGroupHandle_t s_wifi_event_group = NULL;
 
@@ -133,6 +142,9 @@ typedef enum state{
 } state;
 
 state alarmState = idle;
+float sense1;
+float sense2;
+float sense3;
 
 void sntpInit();
 
@@ -153,10 +165,12 @@ void process(char* topic, uint8_t topicLen, char* msg, uint8_t msgLen){
         ESP_LOGI(TAG, "set motor control");
         if(strncmp("ON",msg, msgLen) == 0){
             alarmState = powerOn;
+            gpio_set_level(MOTORAC1, 1);
             esp_mqtt_client_publish(client, "motor/response", "AC1 pump on", 0, 1, 0);
         }
-        if(strncmp("OFF",msg, msgLen) == 0){
+        if(strncmp("OFF",msg, msgLen) == 0){                                                       
             //gpio_set_level(SENSORPWR, 0);
+            gpio_set_level(MOTORAC1, 0);
             esp_mqtt_client_publish(client, "motor/response", "AC1 pump off", 0, 1, 0);
         }
         if(strncmp("STATUS",msg, msgLen) == 0){
@@ -174,6 +188,22 @@ void process(char* topic, uint8_t topicLen, char* msg, uint8_t msgLen){
         if(strncmp("OFF",msg, msgLen) == 0){
             //gpio_set_level(SENSORPWR, 0);
             esp_mqtt_client_publish(client, "motor/response", "AC2 pump off", 0, 1, 0);
+        }
+        if(strncmp("STATUS",msg, msgLen) == 0){
+            char temp[30];
+            //sprintf(temp,"%i,%li,%li,%li,%li",alarmState, sensor1.time,sensor2.time,sensor3.time,sensor4.time);
+            esp_mqtt_client_publish(client, "motor/response", temp, 0, 1, 0);
+        }
+    }
+    if(strncmp("motor/controlDC",topic, topicLen) == 0){
+        ESP_LOGI(TAG, "set motor control");
+        if(strncmp("ON",msg, msgLen) == 0){
+            alarmState = powerOn;
+            esp_mqtt_client_publish(client, "motor/response", "DC pump on", 0, 1, 0);
+        }
+        if(strncmp("OFF",msg, msgLen) == 0){
+            //gpio_set_level(SENSORPWR, 0);
+            esp_mqtt_client_publish(client, "motor/response", "DC pump off", 0, 1, 0);
         }
         if(strncmp("STATUS",msg, msgLen) == 0){
             char temp[30];
@@ -209,12 +239,18 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         msg_id = esp_mqtt_client_publish(client, "conn/update", "MQTT connected", 0, 1, 0);
         ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
 
-        msg_id = esp_mqtt_client_subscribe(client, "motor/control", 0);
-        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+        msg_id = esp_mqtt_client_subscribe(client, "motor/controlAC1", 0);
+        ESP_LOGI(TAG, "sent AC1 subscribe successful, msg_id=%d", msg_id);
+
+        msg_id = esp_mqtt_client_subscribe(client, "motor/controlAC2", 0);
+        ESP_LOGI(TAG, "sent AC2 subscribe successful, msg_id=%d", msg_id);
+
+        msg_id = esp_mqtt_client_subscribe(client, "motor/controlDC", 0);
+        ESP_LOGI(TAG, "sent DC subscribe successful, msg_id=%d", msg_id);
 
         msg_id = esp_mqtt_client_subscribe(client, "threshold/set", 1);
         ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
-
+        gpio_set_level(LED, 1);
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
@@ -304,7 +340,7 @@ static void mqtt_app_start(void)
     ESP_LOGI(TAG, "Connect MQTT");
 }
 
-void randomTankGenerator(void *pvParameter)
+void sensorPublish(void *pvParameter)
 {
     ESP_LOGI(TAG, "Starting random tank level task");
 
@@ -314,8 +350,12 @@ void randomTankGenerator(void *pvParameter)
 
         int random_number = rand() % (max - min + 1) + min;
 
-        printf("Random number1 between %d and %d: %d\n", min, max, random_number);
         char temp[20];
+        sprintf(temp,"%.2f",sense1);
+        esp_mqtt_client_publish(client, "tank/main", (const char*)temp, 0, 1, 0);
+
+        /*printf("Random number1 between %d and %d: %d\n", min, max, random_number);
+        
         sprintf(temp,"%i",random_number);
         esp_mqtt_client_publish(client, "tank/main", (const char*)temp, 0, 1, 0);
         random_number = rand() % (max - min + 1) + min;
@@ -329,9 +369,9 @@ void randomTankGenerator(void *pvParameter)
         printf("Random number1 between %d and %d: %d\n", min, max, random_number);
         
         sprintf(temp,"%i",random_number);
-        esp_mqtt_client_publish(client, "tank/hydroponic", (const char*)temp, 0, 1, 0);
+        esp_mqtt_client_publish(client, "tank/hydroponic", (const char*)temp, 0, 1, 0);*/
 
-        vTaskDelay(60000 / portTICK_PERIOD_MS);
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
         //ESP_LOGI(TAG, "Running OTA example task");
     }
 }
@@ -372,12 +412,12 @@ static void fast_scan(void)
         .sta = {
             //.ssid = "Openserve-1D19",
             //.password = "XYHD66eq44",
-            .ssid = "TP-Link_5E",
-            .password = "Danzall123",
+            //.ssid = "TP-Link_5E",
+            //.password = "Danzall123",
             //.ssid = "CFT_2.4G",
             //.password = "underadome",
-            //.ssid = "SEG260",
-            //.password = "test1234",
+            .ssid = "SEG260",
+            .password = "test1234",
             .scan_method = DEFAULT_SCAN_METHOD,
             .sort_method = DEFAULT_SORT_METHOD,
             .threshold.rssi = DEFAULT_RSSI,
@@ -481,7 +521,7 @@ static void configure_io(void)
     ull output */
     gpio_set_direction(LED, GPIO_MODE_OUTPUT);
     gpio_set_direction(MOTORAC1, GPIO_MODE_OUTPUT);
-    gpio_set_direction(MOTORAC2, GPIO_MODE_OUTPUT);
+    /*gpio_set_direction(MOTORAC2, GPIO_MODE_OUTPUT);
     gpio_set_direction(MOTORDC, GPIO_MODE_OUTPUT);
     gpio_set_direction(BUZZER, GPIO_MODE_OUTPUT);
     gpio_set_direction(TANK1, GPIO_MODE_INPUT);
@@ -491,13 +531,14 @@ static void configure_io(void)
 
     gpio_set_pull_mode(TANK1, GPIO_PULLUP_PULLDOWN);
     gpio_set_pull_mode(TANK2, GPIO_PULLUP_PULLDOWN);
-    gpio_set_pull_mode(TANK3, GPIO_PULLUP_PULLDOWN);
+    gpio_set_pull_mode(TANK3, GPIO_PULLUP_PULLDOWN);*/
     //gpio_set_pull_mode(TANK1, GPIO_PULLUP_PULLDOWN);
 
     /*gpio_reset_pin(SENSOR1);
     gpio_reset_pin(SENSOR2);
     gpio_reset_pin(SENSOR3);
     gpio_reset_pin(SENSOR4);*/
+    gpio_set_level(LED, 0);
 }
 
 uint8_t getSensor(uint8_t index){
@@ -542,6 +583,224 @@ void readSensor(){
     }
 }
 
+
+
+static bool hc_sr04_echo_callback(mcpwm_cap_channel_handle_t cap_chan, const mcpwm_capture_event_data_t *edata, void *user_data)
+{
+    static uint32_t cap_val_begin_of_sample = 0;
+    static uint32_t cap_val_end_of_sample = 0;
+    TaskHandle_t task_to_notify = (TaskHandle_t)user_data;
+    BaseType_t high_task_wakeup = pdFALSE;
+
+    //calculate the interval in the ISR,
+    //so that the interval will be always correct even when capture_queue is not handled in time and overflow.
+    if (edata->cap_edge == MCPWM_CAP_EDGE_POS) {
+        // store the timestamp when pos edge is detected
+        cap_val_begin_of_sample = edata->cap_value;
+        cap_val_end_of_sample = cap_val_begin_of_sample;
+    } else {
+        cap_val_end_of_sample = edata->cap_value;
+        uint32_t tof_ticks = cap_val_end_of_sample - cap_val_begin_of_sample;
+
+        // notify the task to calculate the distance
+        xTaskNotifyFromISR(task_to_notify, tof_ticks, eSetValueWithOverwrite, &high_task_wakeup);
+    }
+
+    return high_task_wakeup == pdTRUE;
+}
+
+/**
+ * @brief generate single pulse on Trig pin to start a new sample
+ */
+static void gen_trig_output(void)
+{
+    gpio_set_level(HC_SR04_TRIG_GPIO, 1); // set high
+    gpio_set_level(HC_SR04_TRIG_GPIO_1, 1); // set high
+    esp_rom_delay_us(10);
+    gpio_set_level(HC_SR04_TRIG_GPIO, 0); // set low
+    gpio_set_level(HC_SR04_TRIG_GPIO_1, 0); // set low
+}
+
+void readSensor1(){
+
+    ESP_LOGI(TAG, "Install capture timer");
+    mcpwm_cap_timer_handle_t cap_timer = NULL;
+    mcpwm_capture_timer_config_t cap_conf = {
+        .clk_src = MCPWM_CAPTURE_CLK_SRC_DEFAULT,
+        .group_id = 0,
+    };
+    ESP_ERROR_CHECK(mcpwm_new_capture_timer(&cap_conf, &cap_timer));
+
+    ESP_LOGI(TAG, "Install capture channel");
+    mcpwm_cap_channel_handle_t cap_chan = NULL;
+    mcpwm_capture_channel_config_t cap_ch_conf = {
+        .gpio_num = HC_SR04_ECHO_GPIO,
+        .prescale = 1,
+        // capture on both edge
+        .flags.neg_edge = true,
+        .flags.pos_edge = true,
+        // pull up internally
+        .flags.pull_up = true,
+    };
+    ESP_ERROR_CHECK(mcpwm_new_capture_channel(cap_timer, &cap_ch_conf, &cap_chan));
+
+    ESP_LOGI(TAG, "Register capture callback");
+    TaskHandle_t cur_task = xTaskGetCurrentTaskHandle();
+    mcpwm_capture_event_callbacks_t cbs = {
+        .on_cap = hc_sr04_echo_callback,
+    };
+    ESP_ERROR_CHECK(mcpwm_capture_channel_register_event_callbacks(cap_chan, &cbs, cur_task));
+
+    ESP_LOGI(TAG, "Enable capture channel");
+    ESP_ERROR_CHECK(mcpwm_capture_channel_enable(cap_chan));
+
+    ESP_LOGI(TAG, "Configure Trig pin");
+    gpio_config_t io_conf = {
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = 1ULL << HC_SR04_TRIG_GPIO,
+    };
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+    // drive low by default
+    ESP_ERROR_CHECK(gpio_set_level(HC_SR04_TRIG_GPIO, 0));
+
+    ESP_LOGI(TAG, "Enable and start capture timer");
+    ESP_ERROR_CHECK(mcpwm_capture_timer_enable(cap_timer));
+    ESP_ERROR_CHECK(mcpwm_capture_timer_start(cap_timer));
+
+    uint32_t tof_ticks;
+    while(1){
+        // trigger the sensor to start a new sample
+        gen_trig_output();
+        // wait for echo done signal
+        if (xTaskNotifyWait(0x00, ULONG_MAX, &tof_ticks, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            float pulse_width_us = tof_ticks * (1000000.0 / esp_clk_apb_freq());
+            if (pulse_width_us > 35000) {
+                // out of range
+                continue;
+            }
+            // convert the pulse width into measure distance
+            float distance = (float) pulse_width_us / 58;
+            sense1 = distance;
+            ESP_LOGI(TAG, "Measured distance: %.2fcm", distance);
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+void readSensor2(){
+
+    ESP_LOGI(TAG, "Install capture timer2");
+    mcpwm_cap_timer_handle_t cap_timer = NULL;
+    mcpwm_capture_timer_config_t cap_conf = {
+        .clk_src = MCPWM_CAPTURE_CLK_SRC_DEFAULT,
+        .group_id = 0,
+    };
+    ESP_ERROR_CHECK(mcpwm_new_capture_timer(&cap_conf, &cap_timer));
+
+    ESP_LOGI(TAG, "Install capture channel");
+    mcpwm_cap_channel_handle_t cap_chan = NULL;
+    mcpwm_capture_channel_config_t cap_ch_conf = {
+        .gpio_num = HC_SR04_ECHO_GPIO_1,
+        .prescale = 1,
+        // capture on both edge
+        .flags.neg_edge = true,
+        .flags.pos_edge = true,
+        // pull up internally
+        .flags.pull_up = true,
+    };
+    ESP_ERROR_CHECK(mcpwm_new_capture_channel(cap_timer, &cap_ch_conf, &cap_chan));
+
+    ESP_LOGI(TAG, "Register capture callback");
+    TaskHandle_t cur_task = xTaskGetCurrentTaskHandle();
+    mcpwm_capture_event_callbacks_t cbs = {
+        .on_cap = hc_sr04_echo_callback,
+    };
+    ESP_ERROR_CHECK(mcpwm_capture_channel_register_event_callbacks(cap_chan, &cbs, cur_task));
+
+    ESP_LOGI(TAG, "Enable capture channel");
+    ESP_ERROR_CHECK(mcpwm_capture_channel_enable(cap_chan));
+
+    ESP_LOGI(TAG, "Configure Trig pin");
+    gpio_config_t io_conf = {
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = 1ULL << HC_SR04_TRIG_GPIO,
+    };
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+    // drive low by default
+    ESP_ERROR_CHECK(gpio_set_level(HC_SR04_TRIG_GPIO, 0));
+
+    ESP_LOGI(TAG, "Enable and start capture timer");
+    ESP_ERROR_CHECK(mcpwm_capture_timer_enable(cap_timer));
+    ESP_ERROR_CHECK(mcpwm_capture_timer_start(cap_timer));
+
+    uint32_t tof_ticks;
+    while(1){
+        // trigger the sensor to start a new sample
+        gen_trig_output();
+        // wait for echo done signal
+        if (xTaskNotifyWait(0x00, ULONG_MAX, &tof_ticks, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            float pulse_width_us = tof_ticks * (1000000.0 / esp_clk_apb_freq());
+            if (pulse_width_us > 35000) {
+                // out of range
+                continue;
+            }
+            // convert the pulse width into measure distance
+            float distance = (float) pulse_width_us / 58;
+            sense1 = distance;
+            ESP_LOGI(TAG, "Measured distance: %.2fcm", distance);
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+void captureInit(){
+    ESP_LOGI(TAG, "Install capture timer");
+    mcpwm_cap_timer_handle_t cap_timer = NULL;
+    mcpwm_capture_timer_config_t cap_conf = {
+        .clk_src = MCPWM_CAPTURE_CLK_SRC_DEFAULT,
+        .group_id = 0,
+    };
+    ESP_ERROR_CHECK(mcpwm_new_capture_timer(&cap_conf, &cap_timer));
+
+    ESP_LOGI(TAG, "Install capture channel");
+    mcpwm_cap_channel_handle_t cap_chan = NULL;
+    mcpwm_capture_channel_config_t cap_ch_conf = {
+        .gpio_num = HC_SR04_ECHO_GPIO,
+        .prescale = 1,
+        // capture on both edge
+        .flags.neg_edge = true,
+        .flags.pos_edge = true,
+        // pull up internally
+        .flags.pull_up = true,
+    };
+    ESP_ERROR_CHECK(mcpwm_new_capture_channel(cap_timer, &cap_ch_conf, &cap_chan));
+
+    ESP_LOGI(TAG, "Register capture callback");
+    TaskHandle_t cur_task = xTaskGetCurrentTaskHandle();
+    mcpwm_capture_event_callbacks_t cbs = {
+        .on_cap = hc_sr04_echo_callback,
+    };
+    ESP_ERROR_CHECK(mcpwm_capture_channel_register_event_callbacks(cap_chan, &cbs, cur_task));
+
+    ESP_LOGI(TAG, "Enable capture channel");
+    ESP_ERROR_CHECK(mcpwm_capture_channel_enable(cap_chan));
+
+    ESP_LOGI(TAG, "Configure Trig pin");
+    gpio_config_t io_conf = {
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = 1ULL << HC_SR04_TRIG_GPIO,
+    };
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+    // drive low by default
+    ESP_ERROR_CHECK(gpio_set_level(HC_SR04_TRIG_GPIO, 0));
+
+    ESP_LOGI(TAG, "Enable and start capture timer");
+    ESP_ERROR_CHECK(mcpwm_capture_timer_enable(cap_timer));
+    ESP_ERROR_CHECK(mcpwm_capture_timer_start(cap_timer));
+}
+
+
+
 void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
@@ -549,6 +808,9 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     configure_io();
     fast_scan();
-    xTaskCreate(randomTankGenerator, "random_task", 8192, NULL, 5, NULL);
-    xTaskCreate(&counterTask, "counter_task", 8192, NULL, 5, NULL);
+    //captureInit();
+    xTaskCreate(sensorPublish, "publish_task", 8192, NULL, 5, NULL);
+    //xTaskCreate(&counterTask, "counter_task", 8192, NULL, 5, NULL);
+    xTaskCreate(readSensor1, "level_task", 8192, NULL, 5, NULL);
+    xTaskCreate(readSensor2, "level_task2", 8192, NULL, 5, NULL);
 }
