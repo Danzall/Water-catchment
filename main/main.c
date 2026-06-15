@@ -89,8 +89,8 @@ static const char *TAG = "water catchment";
 #define DEFAULT_RSSI_5G_ADJUSTMENT 0
 #endif /*CONFIG_EXAMPLE_FAST_SCAN_THRESHOLD*/
 
-#define MOTORAC1 14
-#define MOTORAC2 27
+#define MOTORAC1 12
+#define MOTORAC2 14
 #define MOTORDC 25
 #define TANK1 21
 #define TANK2 22
@@ -98,11 +98,18 @@ static const char *TAG = "water catchment";
 #define BUZZER 16
 #define LED 2
 
-#define HC_SR04_TRIG_GPIO  12
+#define HC_SR04_TRIG_GPIO  32
 #define HC_SR04_ECHO_GPIO  27
 
 #define HC_SR04_TRIG_GPIO_1 26
 #define HC_SR04_ECHO_GPIO_1  25
+
+#define HC_SR04_TRIG_GPIO_2 33
+#define HC_SR04_ECHO_GPIO_2 35
+
+TaskHandle_t myTaskHandle1 = NULL;
+TaskHandle_t myTaskHandle2 = NULL;
+TaskHandle_t myTaskHandle3 = NULL;
 
 EventGroupHandle_t s_wifi_event_group = NULL;
 
@@ -133,6 +140,12 @@ uint32_t senor2Time = 0;
 uint32_t senor3Time = 0;
 uint32_t senor4Time = 0;
 uint32_t presenceTimer = 0;
+float maxLevel = 70;
+uint32_t hydroThreshold = 20;
+uint32_t mainThreshold = 20;
+uint32_t reservoirThreshold = 20;
+char mainLow = 0;
+char reservoirLow = 0;
 
 typedef enum state{
     idle,
@@ -211,9 +224,44 @@ void process(char* topic, uint8_t topicLen, char* msg, uint8_t msgLen){
             esp_mqtt_client_publish(client, "motor/response", temp, 0, 1, 0);
         }
     }
-    if(strncmp("threshold/set",topic, topicLen) == 0){
+    if(strncmp("set/height",topic, topicLen) == 0){
         /*handle threshold set event*/
-        
+        int temp;
+        temp = atoi(msg);
+        maxLevel = 0;
+        maxLevel = temp;
+        ESP_LOGI(TAG, "maxLevel=%f", maxLevel);
+    }
+    if(strncmp("set/hydro",topic, topicLen) == 0){
+        /*handle threshold set event*/
+        int temp;
+        temp = atoi(msg);
+        hydroThreshold = 0;
+        hydroThreshold = temp;
+        ESP_LOGI(TAG, "hydroThreshold=%d", hydroThreshold);
+    }
+    if(strncmp("set/main",topic, topicLen) == 0){
+        /*handle threshold set event*/
+        int temp;
+        temp = atoi(msg);
+        mainThreshold = 0;
+        mainThreshold = temp;
+        ESP_LOGI(TAG, "mainThreshold=%d", mainThreshold);
+    }
+    if(strncmp("set/reservoir",topic, topicLen) == 0){
+        /*handle threshold set event*/
+        int temp;
+        temp = atoi(msg);
+        reservoirThreshold = 0;
+        reservoirThreshold = temp;
+        ESP_LOGI(TAG, "reservoirThreshold=%f", reservoirThreshold);
+    }
+    if(strncmp("param",topic, topicLen) == 0){
+        if(strncmp("STATUS",msg, msgLen) == 0){
+            char temp[30];
+            sprintf(temp,"%.2f,%li,%li,%li",maxLevel, hydroThreshold, mainThreshold, reservoirThreshold);
+            esp_mqtt_client_publish(client, "param/response", temp, 0, 1, 0);
+        }
     }
 }
 
@@ -248,7 +296,19 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         msg_id = esp_mqtt_client_subscribe(client, "motor/controlDC", 0);
         ESP_LOGI(TAG, "sent DC subscribe successful, msg_id=%d", msg_id);
 
-        msg_id = esp_mqtt_client_subscribe(client, "threshold/set", 1);
+        msg_id = esp_mqtt_client_subscribe(client, "set/height", 1);
+        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+
+        msg_id = esp_mqtt_client_subscribe(client, "set/hydro", 1);
+        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+
+        msg_id = esp_mqtt_client_subscribe(client, "set/main", 1);
+        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+
+        msg_id = esp_mqtt_client_subscribe(client, "set/reservoir", 1);
+        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+
+        msg_id = esp_mqtt_client_subscribe(client, "param", 1);
         ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
         gpio_set_level(LED, 1);
         break;
@@ -266,7 +326,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         ESP_LOGI(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
         break;
     case MQTT_EVENT_PUBLISHED:
-        ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
+        //ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
         break;
     case MQTT_EVENT_DATA:
         ESP_LOGI(TAG, "MQTT_EVENT_DATA");
@@ -340,10 +400,73 @@ static void mqtt_app_start(void)
     ESP_LOGI(TAG, "Connect MQTT");
 }
 
+
+float percentage(float input){
+    float increment;
+    float ret;
+    //ESP_LOGI(TAG, "input b: %.2fcm", input);
+    if (input >= maxLevel){
+        input = 0;
+    }
+    else input = maxLevel - input;
+    //ESP_LOGI(TAG, "input a: %.2fcm", input);
+    increment = maxLevel / 100; //fdefault 0.4
+    ret = input / increment;
+    //ESP_LOGI(TAG, "input a: %.2fcm 2: %.2fp inc: %.2fre", input, increment, ret);
+    return ret; 
+
+}
+
+char motorMain = 0;
+char motorReservoir = 0;
+void checkLevels(){
+    ESP_LOGI(TAG, "m1=%d, m2=%d, %.2f, %.2f, %.2f", motorMain, motorReservoir, sense1, sense2, sense3);
+    if((sense2 < hydroThreshold)&&(motorMain == 0)&&(motorReservoir == 0)){
+        if(sense3 > 20){
+            gpio_set_level(MOTORAC2,1);
+            motorReservoir = 1;
+            esp_mqtt_client_publish(client, "event", "reservoir on", 0, 1, 0);
+        }
+        else if (sense1 > 20){
+            gpio_set_level(MOTORAC1,1);
+            motorMain = 1;
+            esp_mqtt_client_publish(client, "event", "main on1", 0, 1, 0);
+        }
+        else{
+            esp_mqtt_client_publish(client, "event", "tanks depleted", 0, 1, 0);
+        }
+    }
+    else if((sense2 > 80)&&(motorReservoir == 1)){    //stop reservor
+        gpio_set_level(MOTORAC2,0);
+        motorReservoir = 0;
+        esp_mqtt_client_publish(client, "event", "reservoir off", 0, 1, 0);
+    }
+    else if((sense2 > 80)&&(motorMain == 1)){    //stop main
+        gpio_set_level(MOTORAC1,0);
+        motorMain = 0;
+        esp_mqtt_client_publish(client, "event", "main off", 0, 1, 0);
+    }
+    else if((sense3 < 20)&&(motorReservoir == 1)){    //reservoir depleted
+        gpio_set_level(MOTORAC2,0);
+        motorReservoir = 0;
+        esp_mqtt_client_publish(client, "event", "reservoir off, depleted", 0, 1, 0);
+        if(sense1 > 20){
+            gpio_set_level(MOTORAC1,1);
+            motorMain = 1;
+            esp_mqtt_client_publish(client, "event", "main on", 0, 1, 0);
+        }
+    }
+    else if((sense1 < 20)&&(motorMain == 1)){    //main depleted
+        gpio_set_level(MOTORAC1,0);
+        motorMain = 0;
+        esp_mqtt_client_publish(client, "event", "main off, depleted", 0, 1, 0);
+    }
+}
+
 void sensorPublish(void *pvParameter)
 {
     ESP_LOGI(TAG, "Starting random tank level task");
-
+    //cJSON *root = cJSON_Parse(json_string);
     while (1) {
         int min = 1;
         int max = 100;
@@ -351,8 +474,24 @@ void sensorPublish(void *pvParameter)
         int random_number = rand() % (max - min + 1) + min;
 
         char temp[20];
+        
+        sprintf(temp,"%.2f",sense1);
+        esp_mqtt_client_publish(client, "tank/main/raw", (const char*)temp, 0, 1, 0);
+        sense1 = percentage(sense1);
         sprintf(temp,"%.2f",sense1);
         esp_mqtt_client_publish(client, "tank/main", (const char*)temp, 0, 1, 0);
+        sprintf(temp,"%.2f",sense2);
+        esp_mqtt_client_publish(client, "tank/hydro/raw", (const char*)temp, 0, 1, 0);
+        sense2 = percentage(sense2);
+        sprintf(temp,"%.2f",sense2);
+        esp_mqtt_client_publish(client, "tank/hydro", (const char*)temp, 0, 1, 0);
+        sprintf(temp,"%.2f",sense3);
+        esp_mqtt_client_publish(client, "tank/reservoir/raw", (const char*)temp, 0, 1, 0);
+        sense3 = percentage(sense3);
+        sprintf(temp,"%.2f",sense3);
+        esp_mqtt_client_publish(client, "tank/reservoir", (const char*)temp, 0, 1, 0);
+
+        checkLevels();
 
         /*printf("Random number1 between %d and %d: %d\n", min, max, random_number);
         
@@ -371,7 +510,7 @@ void sensorPublish(void *pvParameter)
         sprintf(temp,"%i",random_number);
         esp_mqtt_client_publish(client, "tank/hydroponic", (const char*)temp, 0, 1, 0);*/
 
-        vTaskDelay(5000 / portTICK_PERIOD_MS);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
         //ESP_LOGI(TAG, "Running OTA example task");
     }
 }
@@ -414,10 +553,10 @@ static void fast_scan(void)
             //.password = "XYHD66eq44",
             //.ssid = "TP-Link_5E",
             //.password = "Danzall123",
-            //.ssid = "CFT_2.4G",
-            //.password = "underadome",
-            .ssid = "SEG260",
-            .password = "test1234",
+            .ssid = "CFT_2.4G",
+            .password = "underadome",
+            //.ssid = "SEG260",
+            //.password = "test1234",
             .scan_method = DEFAULT_SCAN_METHOD,
             .sort_method = DEFAULT_SORT_METHOD,
             .threshold.rssi = DEFAULT_RSSI,
@@ -521,6 +660,9 @@ static void configure_io(void)
     ull output */
     gpio_set_direction(LED, GPIO_MODE_OUTPUT);
     gpio_set_direction(MOTORAC1, GPIO_MODE_OUTPUT);
+    gpio_set_direction(HC_SR04_TRIG_GPIO_2, GPIO_MODE_OUTPUT);
+    gpio_set_direction(HC_SR04_TRIG_GPIO_1, GPIO_MODE_OUTPUT);
+    gpio_set_direction(HC_SR04_TRIG_GPIO, GPIO_MODE_OUTPUT);
     /*gpio_set_direction(MOTORAC2, GPIO_MODE_OUTPUT);
     gpio_set_direction(MOTORDC, GPIO_MODE_OUTPUT);
     gpio_set_direction(BUZZER, GPIO_MODE_OUTPUT);
@@ -616,9 +758,11 @@ static void gen_trig_output(void)
 {
     gpio_set_level(HC_SR04_TRIG_GPIO, 1); // set high
     gpio_set_level(HC_SR04_TRIG_GPIO_1, 1); // set high
+    gpio_set_level(HC_SR04_TRIG_GPIO_2, 1); // set high
     esp_rom_delay_us(10);
     gpio_set_level(HC_SR04_TRIG_GPIO, 0); // set low
     gpio_set_level(HC_SR04_TRIG_GPIO_1, 0); // set low
+    gpio_set_level(HC_SR04_TRIG_GPIO_2, 0); // set low
 }
 
 void readSensor1(){
@@ -646,6 +790,7 @@ void readSensor1(){
 
     ESP_LOGI(TAG, "Register capture callback");
     TaskHandle_t cur_task = xTaskGetCurrentTaskHandle();
+    ESP_LOGI(TAG, "Current Task Handle Address: %p", (void*)cur_task);
     mcpwm_capture_event_callbacks_t cbs = {
         .on_cap = hc_sr04_echo_callback,
     };
@@ -653,6 +798,58 @@ void readSensor1(){
 
     ESP_LOGI(TAG, "Enable capture channel");
     ESP_ERROR_CHECK(mcpwm_capture_channel_enable(cap_chan));
+
+    //new channel
+    mcpwm_cap_channel_handle_t cap_chan1 = NULL;
+    mcpwm_capture_channel_config_t cap_ch_conf1 = {
+        .gpio_num = HC_SR04_ECHO_GPIO_1,
+        .prescale = 1,
+        // capture on both edge
+        .flags.neg_edge = true,
+        .flags.pos_edge = true,
+        // pull up internally
+        .flags.pull_up = true,
+    };
+    ESP_ERROR_CHECK(mcpwm_new_capture_channel(cap_timer, &cap_ch_conf1, &cap_chan1));
+
+    ESP_LOGI(TAG, "Register capture callback2");
+    //TaskHandle_t cur_task = xTaskGetCurrentTaskHandle();
+    // Print the raw handle pointer address
+    //ESP_LOGI(TAG, "Current Task Handle Address21: %p", (void*)cur_task);
+    /*mcpwm_capture_event_callbacks_t cbs = {
+        .on_cap = hc_sr04_echo_callback,
+    };*/
+    //ESP_ERROR_CHECK(mcpwm_capture_channel_register_event_callbacks(cap_chan, &cbs, cur_task));
+    ESP_ERROR_CHECK(mcpwm_capture_channel_register_event_callbacks(cap_chan1, &cbs, myTaskHandle2));
+
+    ESP_LOGI(TAG, "Enable capture channel21");
+    ESP_ERROR_CHECK(mcpwm_capture_channel_enable(cap_chan1));
+
+    //channel 3
+    mcpwm_cap_channel_handle_t cap_chan2 = NULL;
+    mcpwm_capture_channel_config_t cap_ch_conf2 = {
+        .gpio_num = HC_SR04_ECHO_GPIO_2,
+        .prescale = 1,
+        // capture on both edge
+        .flags.neg_edge = true,
+        .flags.pos_edge = true,
+        // pull up internally
+        .flags.pull_up = true,
+    };
+    ESP_ERROR_CHECK(mcpwm_new_capture_channel(cap_timer, &cap_ch_conf2, &cap_chan2));
+
+    ESP_LOGI(TAG, "Register capture callback2");
+    //TaskHandle_t cur_task = xTaskGetCurrentTaskHandle();
+    // Print the raw handle pointer address
+    //ESP_LOGI(TAG, "Current Task Handle Address21: %p", (void*)cur_task);
+    /*mcpwm_capture_event_callbacks_t cbs = {
+        .on_cap = hc_sr04_echo_callback,
+    };*/
+    //ESP_ERROR_CHECK(mcpwm_capture_channel_register_event_callbacks(cap_chan, &cbs, cur_task));
+    ESP_ERROR_CHECK(mcpwm_capture_channel_register_event_callbacks(cap_chan2, &cbs, myTaskHandle3));
+
+    ESP_LOGI(TAG, "Enable capture channel21");
+    ESP_ERROR_CHECK(mcpwm_capture_channel_enable(cap_chan2));
 
     ESP_LOGI(TAG, "Configure Trig pin");
     gpio_config_t io_conf = {
@@ -670,7 +867,12 @@ void readSensor1(){
     uint32_t tof_ticks;
     while(1){
         // trigger the sensor to start a new sample
-        gen_trig_output();
+        //gen_trig_output();
+        gpio_set_level(HC_SR04_TRIG_GPIO, 1); // set high
+    
+        esp_rom_delay_us(10);
+        gpio_set_level(HC_SR04_TRIG_GPIO, 0); // set low
+   
         // wait for echo done signal
         if (xTaskNotifyWait(0x00, ULONG_MAX, &tof_ticks, pdMS_TO_TICKS(1000)) == pdTRUE) {
             float pulse_width_us = tof_ticks * (1000000.0 / esp_clk_apb_freq());
@@ -681,7 +883,7 @@ void readSensor1(){
             // convert the pulse width into measure distance
             float distance = (float) pulse_width_us / 58;
             sense1 = distance;
-            ESP_LOGI(TAG, "Measured distance: %.2fcm", distance);
+            //ESP_LOGI(TAG, "Measured distance: %.2fcm", distance);
         }
         vTaskDelay(pdMS_TO_TICKS(500));
     }
@@ -690,14 +892,14 @@ void readSensor1(){
 void readSensor2(){
 
     ESP_LOGI(TAG, "Install capture timer2");
-    mcpwm_cap_timer_handle_t cap_timer = NULL;
+    /*mcpwm_cap_timer_handle_t cap_timer = NULL;
     mcpwm_capture_timer_config_t cap_conf = {
         .clk_src = MCPWM_CAPTURE_CLK_SRC_DEFAULT,
-        .group_id = 0,
+        .group_id = 1,
     };
     ESP_ERROR_CHECK(mcpwm_new_capture_timer(&cap_conf, &cap_timer));
 
-    ESP_LOGI(TAG, "Install capture channel");
+    ESP_LOGI(TAG, "Install capture channel2");
     mcpwm_cap_channel_handle_t cap_chan = NULL;
     mcpwm_capture_channel_config_t cap_ch_conf = {
         .gpio_num = HC_SR04_ECHO_GPIO_1,
@@ -710,17 +912,20 @@ void readSensor2(){
     };
     ESP_ERROR_CHECK(mcpwm_new_capture_channel(cap_timer, &cap_ch_conf, &cap_chan));
 
-    ESP_LOGI(TAG, "Register capture callback");
+    ESP_LOGI(TAG, "Register capture callback2");
     TaskHandle_t cur_task = xTaskGetCurrentTaskHandle();
+    // Print the raw handle pointer address
+    ESP_LOGI(TAG, "Current Task Handle Address: %p", (void*)cur_task);
     mcpwm_capture_event_callbacks_t cbs = {
         .on_cap = hc_sr04_echo_callback,
     };
-    ESP_ERROR_CHECK(mcpwm_capture_channel_register_event_callbacks(cap_chan, &cbs, cur_task));
+    //ESP_ERROR_CHECK(mcpwm_capture_channel_register_event_callbacks(cap_chan, &cbs, cur_task));
+    ESP_ERROR_CHECK(mcpwm_capture_channel_register_event_callbacks(cap_chan, &cbs, myTaskHandle2));
 
-    ESP_LOGI(TAG, "Enable capture channel");
+    ESP_LOGI(TAG, "Enable capture channel2");
     ESP_ERROR_CHECK(mcpwm_capture_channel_enable(cap_chan));
 
-    ESP_LOGI(TAG, "Configure Trig pin");
+    ESP_LOGI(TAG, "Configure Trig pin2");
     gpio_config_t io_conf = {
         .mode = GPIO_MODE_OUTPUT,
         .pin_bit_mask = 1ULL << HC_SR04_TRIG_GPIO,
@@ -729,14 +934,21 @@ void readSensor2(){
     // drive low by default
     ESP_ERROR_CHECK(gpio_set_level(HC_SR04_TRIG_GPIO, 0));
 
-    ESP_LOGI(TAG, "Enable and start capture timer");
+    ESP_LOGI(TAG, "Enable and start capture timer2");
     ESP_ERROR_CHECK(mcpwm_capture_timer_enable(cap_timer));
-    ESP_ERROR_CHECK(mcpwm_capture_timer_start(cap_timer));
+    ESP_ERROR_CHECK(mcpwm_capture_timer_start(cap_timer));*/
 
     uint32_t tof_ticks;
     while(1){
         // trigger the sensor to start a new sample
-        gen_trig_output();
+        //gen_trig_output();
+        
+        gpio_set_level(HC_SR04_TRIG_GPIO_1, 1); // set high
+        
+        esp_rom_delay_us(10);
+        
+        gpio_set_level(HC_SR04_TRIG_GPIO_1, 0); // set low
+    
         // wait for echo done signal
         if (xTaskNotifyWait(0x00, ULONG_MAX, &tof_ticks, pdMS_TO_TICKS(1000)) == pdTRUE) {
             float pulse_width_us = tof_ticks * (1000000.0 / esp_clk_apb_freq());
@@ -746,8 +958,36 @@ void readSensor2(){
             }
             // convert the pulse width into measure distance
             float distance = (float) pulse_width_us / 58;
-            sense1 = distance;
-            ESP_LOGI(TAG, "Measured distance: %.2fcm", distance);
+            sense2 = distance;
+            //ESP_LOGI(TAG, "Measured distance2: %.2fcm", distance);
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+void readSensor3(){
+
+    ESP_LOGI(TAG, "Install capture timer3");
+
+    uint32_t tof_ticks;
+    while(1){
+        // trigger the sensor to start a new sample
+        //gen_trig_output();
+            gpio_set_level(HC_SR04_TRIG_GPIO_2, 1); // set high
+        esp_rom_delay_us(10);
+        
+        gpio_set_level(HC_SR04_TRIG_GPIO_2, 0); // set low
+        // wait for echo done signal
+        if (xTaskNotifyWait(0x00, ULONG_MAX, &tof_ticks, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            float pulse_width_us = tof_ticks * (1000000.0 / esp_clk_apb_freq());
+            if (pulse_width_us > 35000) {
+                // out of range
+                continue;
+            }
+            // convert the pulse width into measure distance
+            float distance = (float) pulse_width_us / 58;
+            sense3 = distance;
+            //ESP_LOGI(TAG, "Measured distance3: %.2fcm", distance);
         }
         vTaskDelay(pdMS_TO_TICKS(500));
     }
@@ -800,7 +1040,6 @@ void captureInit(){
 }
 
 
-
 void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
@@ -811,6 +1050,10 @@ void app_main(void)
     //captureInit();
     xTaskCreate(sensorPublish, "publish_task", 8192, NULL, 5, NULL);
     //xTaskCreate(&counterTask, "counter_task", 8192, NULL, 5, NULL);
-    xTaskCreate(readSensor1, "level_task", 8192, NULL, 5, NULL);
-    xTaskCreate(readSensor2, "level_task2", 8192, NULL, 5, NULL);
+    //xTaskCreate(readSensor1, "level_task", 8192, NULL, 5, NULL);
+    //xTaskCreate(readSensor2, "level_task2", 8192, NULL, 5, NULL);
+
+    xTaskCreate(readSensor1, "level_task", 8192, NULL, 5, &myTaskHandle1);
+    xTaskCreate(readSensor2, "level_task", 8192, NULL, 5, &myTaskHandle2);
+    xTaskCreate(readSensor3, "level_task3", 8192, NULL, 5, &myTaskHandle3);
 }
