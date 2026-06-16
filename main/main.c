@@ -35,6 +35,7 @@
 
 #include "driver/mcpwm_cap.h"
 #include "esp_private/esp_clk.h"
+#include "bdc_motor.h"
 
 static const char *TAG = "water catchment";
 
@@ -106,6 +107,12 @@ static const char *TAG = "water catchment";
 
 #define HC_SR04_TRIG_GPIO_2 33
 #define HC_SR04_ECHO_GPIO_2 35
+
+#define BDC_MCPWM_TIMER_RESOLUTION_HZ 10000000 // 10MHz, 1 tick = 0.1us
+#define BDC_MCPWM_FREQ_HZ             25000    // 25KHz PWM
+#define BDC_MCPWM_DUTY_TICK_MAX       (BDC_MCPWM_TIMER_RESOLUTION_HZ / BDC_MCPWM_FREQ_HZ) // maximum value we can set for the duty cycle, in ticks
+#define BDC_MCPWM_GPIO_A              2
+#define BDC_MCPWM_GPIO_B              15
 
 TaskHandle_t myTaskHandle1 = NULL;
 TaskHandle_t myTaskHandle2 = NULL;
@@ -193,13 +200,17 @@ void process(char* topic, uint8_t topicLen, char* msg, uint8_t msgLen){
         }
     }
     if(strncmp("motor/controlAC2",topic, topicLen) == 0){
-        ESP_LOGI(TAG, "set motor control");
+        ESP_LOGI(TAG, "set motor control2");
         if(strncmp("ON",msg, msgLen) == 0){
             alarmState = powerOn;
+            ESP_LOGI(TAG, "on");
+            gpio_set_level(MOTORAC2, 1);
             esp_mqtt_client_publish(client, "motor/response", "AC2 pump on", 0, 1, 0);
         }
         if(strncmp("OFF",msg, msgLen) == 0){
             //gpio_set_level(SENSORPWR, 0);
+            gpio_set_level(MOTORAC2, 0);
+            ESP_LOGI(TAG, "off");
             esp_mqtt_client_publish(client, "motor/response", "AC2 pump off", 0, 1, 0);
         }
         if(strncmp("STATUS",msg, msgLen) == 0){
@@ -663,8 +674,8 @@ static void configure_io(void)
     gpio_set_direction(HC_SR04_TRIG_GPIO_2, GPIO_MODE_OUTPUT);
     gpio_set_direction(HC_SR04_TRIG_GPIO_1, GPIO_MODE_OUTPUT);
     gpio_set_direction(HC_SR04_TRIG_GPIO, GPIO_MODE_OUTPUT);
-    /*gpio_set_direction(MOTORAC2, GPIO_MODE_OUTPUT);
-    gpio_set_direction(MOTORDC, GPIO_MODE_OUTPUT);
+    gpio_set_direction(MOTORAC2, GPIO_MODE_OUTPUT);
+    /*gpio_set_direction(MOTORDC, GPIO_MODE_OUTPUT);
     gpio_set_direction(BUZZER, GPIO_MODE_OUTPUT);
     gpio_set_direction(TANK1, GPIO_MODE_INPUT);
     gpio_set_direction(TANK2, GPIO_MODE_INPUT);
@@ -1047,6 +1058,30 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     configure_io();
     fast_scan();
+    //static motor_control_context_t motor_ctrl_ctx = {
+    //    .pcnt_encoder = NULL,
+    //};
+
+    ESP_LOGI(TAG, "Create DC motor");
+    bdc_motor_config_t motor_config = {
+        .pwm_freq_hz = BDC_MCPWM_FREQ_HZ,
+        .pwma_gpio_num = BDC_MCPWM_GPIO_A,
+        .pwmb_gpio_num = BDC_MCPWM_GPIO_B,
+    };
+    bdc_motor_mcpwm_config_t mcpwm_config = {
+        .group_id = 0,
+        .resolution_hz = BDC_MCPWM_TIMER_RESOLUTION_HZ,
+    };
+    bdc_motor_handle_t motor = NULL;
+    ESP_ERROR_CHECK(bdc_motor_new_mcpwm_device(&motor_config, &mcpwm_config, &motor));
+    //motor_ctrl_ctx.motor = motor;
+
+    ESP_LOGI(TAG, "Enable motor");
+    ESP_ERROR_CHECK(bdc_motor_enable(motor));
+    ESP_LOGI(TAG, "Forward motor");
+    ESP_ERROR_CHECK(bdc_motor_forward(motor));
+    bdc_motor_set_speed(motor, 50);
+
     //captureInit();
     xTaskCreate(sensorPublish, "publish_task", 8192, NULL, 5, NULL);
     //xTaskCreate(&counterTask, "counter_task", 8192, NULL, 5, NULL);
